@@ -1,4 +1,5 @@
 const WebSocket = require("ws");
+const http = require("http"); // для self-ping
 
 const PORT = process.env.PORT || 10000;
 const wss = new WebSocket.Server({ port: PORT });
@@ -97,3 +98,20 @@ wss.on("connection", ws => {
 setInterval(() => {
   broadcast(getUtcTime());
 }, 60_000);
+
+// ---------- SELF-PING ----------
+// раз в 10 минут сервер сам себе делает запрос, чтобы не закрывался
+setInterval(() => {
+  const options = {
+    host: "localhost",
+    port: PORT,
+    path: "/"
+  };
+
+  http.get(options, res => {
+    console.log(`Self-ping status: ${res.statusCode}`);
+    res.resume();
+  }).on("error", err => {
+    console.log("Self-ping failed:", err.message);
+  });
+}, 600_000); // 600_000 мс = 10 минут
