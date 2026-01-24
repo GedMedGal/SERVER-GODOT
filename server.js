@@ -73,6 +73,16 @@ wss.on("connection", ws => {
       });
       return;
     }
+
+    // SYSTEM MESSAGE (новый блок)
+    if (data.type === "system") {
+      if (!data.text || data.text.length > 200) return;
+      broadcast({
+        type: "system",
+        text: data.text
+      });
+      return;
+    }
   });
 
   ws.on("close", () => {
