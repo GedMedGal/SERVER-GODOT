@@ -2,7 +2,11 @@ const WebSocket = require("ws");
 const http = require("http");
 
 const PORT = process.env.PORT || 10000;
-const wss = new WebSocket.Server({ port: PORT });
+const wss = new WebSocket.Server({ 
+  port: PORT,
+  clientTracking: true, // Включаем отслеживание клиентов
+  perMessageDeflate: false // Отключаем сжатие для совместимости с Godot
+});
 
 console.log("Chat + Time server running on port", PORT);
 
@@ -37,20 +41,24 @@ function broadcast(data) {
   const msg = JSON.stringify(data);
   wss.clients.forEach(c => {
     if (c.readyState === WebSocket.OPEN) {
-      c.send(msg);
+      c.send(msg).catch(err => {
+        console.error("Broadcast error:", err.message);
+      });
     }
   });
 }
 
 // ---------- CONNECTION ----------
 wss.on("connection", ws => {
+  ws.isAlive = true;
   ws.nickname = "Guest";
-  ws.lastActive = Date.now(); // Инициализация активности
 
-  // Отправляем текущее время при подключении
+  // Отправляем время при подключении
   ws.send(JSON.stringify(getUtcTime()));
 
   ws.on("message", raw => {
+    ws.isAlive = true; // Сбрасываем таймер при ЛЮБОМ сообщении
+
     let data;
     try { 
       data = JSON.parse(raw); 
@@ -58,17 +66,10 @@ wss.on("connection", ws => {
       return; 
     }
 
-    // КРИТИЧНО: обновляем активность ПЕРЕД обработкой
-    ws.lastActive = Date.now();
-
-    // === ОБРАБОТКА PING (ключевое исправление) ===
+    // PING от клиента (для совместимости)
     if (data.type === "ping") {
-      ws.send(JSON.stringify({ 
-        type: "pong", 
-        timestamp: Date.now(),
-        client_time: data.client_time || 0 
-      }));
-      return; // НЕ рассылаем другим!
+      ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
+      return;
     }
 
     // JOIN
@@ -92,7 +93,7 @@ wss.on("connection", ws => {
       return;
     }
 
-    // SYSTEM MESSAGE
+    // SYSTEM
     if (data.type === "system") {
       if (!data.text || typeof data.text !== "string" || data.text.length > 200) return;
       broadcast({
@@ -115,29 +116,28 @@ wss.on("connection", ws => {
   });
 });
 
-// Рассылка времени каждую минуту
+// === КРИТИЧНО: АКТИВНЫЕ PING ОТ СЕРВЕРА К КЛИЕНТАМ ===
+// Это обходит ограничения хостинга Render!
+setInterval(() => {
+  wss.clients.forEach(ws => {
+    if (ws.isAlive === false) {
+      console.log(`[KICK] ${ws.nickname || 'Guest'} не ответил на пинг`);
+      return ws.terminate(); // Принудительное закрытие
+    }
+
+    ws.isAlive = false;
+    ws.ping(); // ← СТАНДАРТНЫЙ WebSocket PING FRAME (не текст!)
+  });
+}, 30_000); // Каждые 30 секунд
+
+// Рассылка времени
 setInterval(() => {
   broadcast(getUtcTime());
 }, 60_000);
 
-// === ЗАЩИТА ОТ НЕАКТИВНОСТИ (главное исправление) ===
-const INACTIVITY_TIMEOUT = 90_000; // 90 секунд
-setInterval(() => {
-  const now = Date.now();
-  wss.clients.forEach(ws => {
-    if (ws.readyState === WebSocket.OPEN && now - ws.lastActive > INACTIVITY_TIMEOUT) {
-      console.log(`[KICK] ${ws.nickname} inactive for ${(now - ws.lastActive)/1000}s`);
-      ws.close(1000, "Inactive"); // 1000 = нормальное закрытие
-    }
-  });
-}, 30_000); // Проверка каждые 30 сек
-
-// Self-ping для предотвращения сна сервера на Render
+// Self-ping для предотвращения сна сервера
 setInterval(() => {
   http.get({ host: "localhost", port: PORT, path: "/" }, res => {
-    console.log(`[SERVER] Self-ping OK (${res.statusCode})`);
     res.resume();
-  }).on("error", err => {
-    console.log("[SERVER] Self-ping failed:", err.message);
-  });
-}, 600_000); // Каждые 10 минут
+  }).on("error", () => {});
+}, 300_000); // Каждые 5 минут (чаще!)
