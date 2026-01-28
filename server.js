@@ -1,10 +1,19 @@
+const http = require("http");
 const WebSocket = require("ws");
-const http = require("http"); // для self-ping
 
 const PORT = process.env.PORT || 10000;
-const wss = new WebSocket.Server({ port: PORT });
 
-console.log("Chat + Time server running on port", PORT);
+// ---------------- HTTP SERVER ----------------
+// Render требует HTTP-ответ
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("OK");
+});
+
+// ---------------- WEBSOCKET ------------------
+const wss = new WebSocket.Server({ server });
+
+console.log("Starting server...");
 
 // ---------- SEASON ----------
 function getSeasonUTC(month) {
@@ -35,9 +44,9 @@ function getUtcTime() {
 // ---------- BROADCAST ----------
 function broadcast(data) {
   const msg = JSON.stringify(data);
-  wss.clients.forEach(c => {
-    if (c.readyState === WebSocket.OPEN) {
-      c.send(msg);
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(msg);
     }
   });
 }
@@ -46,17 +55,22 @@ function broadcast(data) {
 wss.on("connection", ws => {
   ws.nickname = "Guest";
 
-  // сразу отправляем время + сезон
+  console.log("Client connected");
+
+  // сразу отправляем время
   ws.send(JSON.stringify(getUtcTime()));
 
   ws.on("message", raw => {
     let data;
-    try { data = JSON.parse(raw); }
-    catch { return; }
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return;
+    }
 
     // JOIN
     if (data.type === "join") {
-      ws.nickname = String(data.name).substring(0, 16);
+      ws.nickname = String(data.name || "Guest").substring(0, 16);
       broadcast({
         type: "system",
         text: `${ws.nickname} joined the chat`
@@ -64,7 +78,7 @@ wss.on("connection", ws => {
       return;
     }
 
-    // MESSAGE
+    // CHAT MESSAGE
     if (data.type === "message") {
       if (!data.text || data.text.length > 200) return;
       broadcast({
@@ -75,7 +89,7 @@ wss.on("connection", ws => {
       return;
     }
 
-    // SYSTEM MESSAGE (новый блок)
+    // SYSTEM MESSAGE
     if (data.type === "system") {
       if (!data.text || data.text.length > 200) return;
       broadcast({
@@ -87,6 +101,7 @@ wss.on("connection", ws => {
   });
 
   ws.on("close", () => {
+    console.log("Client disconnected");
     broadcast({
       type: "system",
       text: `${ws.nickname} left the chat`
@@ -94,24 +109,12 @@ wss.on("connection", ws => {
   });
 });
 
-// раз в минуту обновляем время всем
+// ---------- TIME TICK ----------
 setInterval(() => {
   broadcast(getUtcTime());
 }, 60_000);
 
-// ---------- SELF-PING ----------
-// раз в 10 минут сервер сам себе делает запрос, чтобы не закрывался
-setInterval(() => {
-  const options = {
-    host: "localhost",
-    port: PORT,
-    path: "/"
-  };
-
-  http.get(options, res => {
-    console.log(`Self-ping status: ${res.statusCode}`);
-    res.resume();
-  }).on("error", err => {
-    console.log("Self-ping failed:", err.message);
-  });
-}, 600_000); // 600_000 мс = 10 минут
+// ---------- START ----------
+server.listen(PORT, () => {
+  console.log(`HTTP + WS server listening on port ${PORT}`);
+});
