@@ -68,7 +68,7 @@ wss.on("connection", ws => {
 
   console.log("Client connected");
 
-  // 👉 только ОДИН раз при входе
+  // отправляем время один раз при входе
   ws.send(JSON.stringify(getUtcTime()));
 
   ws.on("message", raw => {
@@ -100,5 +100,45 @@ wss.on("connection", ws => {
       return;
     }
 
-    // CLIENT PING (НЕ триггерит чат)
-    if (data.type === "
+    // CLIENT PING
+    if (data.type === "ping") {
+      ws.send(JSON.stringify({ type: "pong" }));
+      return;
+    }
+
+    // EVENT (например, рыба поймана)
+    if (data.type === "event" && data.event === "fish_caught") {
+      if (!data.data || !data.data.player || !data.data.fish) return;
+      broadcast({
+        type: "system",
+        text: `${data.data.player} caught ${data.data.fish}!`
+      });
+      return;
+    }
+  });
+
+  ws.on("close", () => {
+    console.log("Client disconnected");
+    broadcast({
+      type: "system",
+      text: `${ws.nickname} left the chat`
+    });
+  });
+});
+
+// ---------- GLOBAL TIME LOGIC ----------
+
+// обновление времени для логики (день/ночь)
+setInterval(() => {
+  broadcast(getUtcTime());
+}, 60_000);
+
+// сервер пишет в чат САМ (раз в 30 сек)
+setInterval(() => {
+  broadcastServerTimeMessage();
+}, 30_000);
+
+// ---------- START ----------
+server.listen(PORT, () => {
+  console.log(`HTTP + WS server listening on port ${PORT}`);
+});
