@@ -4,7 +4,6 @@ const WebSocket = require("ws");
 const PORT = process.env.PORT || 10000;
 
 // ---------------- HTTP SERVER ----------------
-// Render требует HTTP-ответ 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("OK");
@@ -51,13 +50,25 @@ function broadcast(data) {
   });
 }
 
+// ---------- SERVER TIME MESSAGE ----------
+function broadcastServerTimeMessage() {
+  const now = new Date();
+  const timeText = now.toLocaleTimeString("ru-RU", { timeZone: "UTC" });
+
+  broadcast({
+    type: "system",
+    text: `Время сервера (UTC): ${timeText}`
+  });
+}
+
 // ---------- CONNECTION ----------
 wss.on("connection", ws => {
   ws.nickname = "Guest";
+  ws.lastPing = 0;
 
   console.log("Client connected");
 
-  // сразу отправляем время
+  // 👉 только ОДИН раз при входе
   ws.send(JSON.stringify(getUtcTime()));
 
   ws.on("message", raw => {
@@ -89,32 +100,5 @@ wss.on("connection", ws => {
       return;
     }
 
-    // SYSTEM MESSAGE
-    if (data.type === "system") {
-      if (!data.text || data.text.length > 200) return;
-      broadcast({
-        type: "system",
-        text: data.text
-      });
-      return;
-    }
-  });
-
-  ws.on("close", () => {
-    console.log("Client disconnected");
-    broadcast({
-      type: "system",
-      text: `${ws.nickname} left the chat`
-    });
-  });
-});
-
-// ---------- TIME TICK ----------
-setInterval(() => {
-  broadcast(getUtcTime());
-}, 60_000);
-
-// ---------- START ----------
-server.listen(PORT, () => {
-  console.log(`HTTP + WS server listening on port ${PORT}`);
-});
+    // CLIENT PING (НЕ триггерит чат)
+    if (data.type === "
