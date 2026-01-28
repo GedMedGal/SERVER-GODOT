@@ -3,26 +3,22 @@ const WebSocket = require("ws");
 
 const PORT = process.env.PORT || 10000;
 
-// ---------------- HTTP SERVER ----------------
 const server = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("OK");
 });
 
-// ---------------- WEBSOCKET ------------------
 const wss = new WebSocket.Server({ server });
 
 console.log("Starting server...");
 
-// ---------- SEASON ----------
 function getSeasonUTC(month) {
-  if (month === 12 || month <= 2) return 0; // WINTER
-  if (month >= 3 && month <= 5) return 1;  // SPRING
-  if (month >= 6 && month <= 8) return 2;  // SUMMER
-  return 3;                               // FALL
+  if (month === 12 || month <= 2) return 0;
+  if (month >= 3 && month <= 5) return 1;
+  if (month >= 6 && month <= 8) return 2;
+  return 3;
 }
 
-// ---------- UTC TIME ----------
 function getUtcTime() {
   const now = new Date();
   const month = now.getUTCMonth() + 1;
@@ -40,33 +36,32 @@ function getUtcTime() {
   };
 }
 
-// ---------- BROADCAST ----------
 function broadcast(data) {
   const msg = JSON.stringify(data);
   wss.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
-      client.send(msg);
+      try {
+        client.send(msg);
+      } catch (e) {
+        console.log("Failed to send to client:", e);
+      }
     }
   });
 }
 
-// ---------- SERVER TIME MESSAGE ----------
 function broadcastServerTimeMessage() {
   const now = new Date();
   const timeText = now.toLocaleTimeString("ru-RU", { timeZone: "UTC" });
-
   broadcast({
     type: "system",
     text: `Время сервера (UTC): ${timeText}`
   });
 }
 
-// ---------- CONNECTION ----------
 wss.on("connection", ws => {
   ws.nickname = "Guest";
   console.log("Client connected");
 
-  // отправляем время один раз при входе
   ws.send(JSON.stringify(getUtcTime()));
 
   ws.on("message", raw => {
@@ -76,21 +71,14 @@ wss.on("connection", ws => {
     // JOIN
     if (data.type === "join") {
       ws.nickname = String(data.name || "Guest").substring(0, 16);
-      broadcast({
-        type: "system",
-        text: `${ws.nickname} joined the chat`
-      });
+      broadcast({ type: "system", text: `${ws.nickname} joined the chat` });
       return;
     }
 
     // CHAT MESSAGE
     if (data.type === "message") {
       if (!data.text || data.text.length > 200) return;
-      broadcast({
-        type: "message",
-        name: ws.nickname,
-        text: data.text
-      });
+      broadcast({ type: "message", name: ws.nickname, text: data.text });
       return;
     }
 
@@ -100,38 +88,26 @@ wss.on("connection", ws => {
       return;
     }
 
-    // EVENT (например, рыба поймана)
+    // EVENT FISH CAUGHT
     if (data.type === "event" && data.event === "fish_caught") {
-      if (!data.data || !data.data.player || !data.data.fish) return;
-      broadcast({
-        type: "system",
-        text: `${data.data.player} caught ${data.data.fish}!`
-      });
+      const player = data.data?.player || "Unknown";
+      const fish = data.data?.fish || "Unknown fish";
+      console.log(`Fish caught event: ${player} caught ${fish}`);
+      broadcast({ type: "system", text: `${player} caught ${fish}!` });
       return;
     }
   });
 
   ws.on("close", () => {
     console.log("Client disconnected");
-    broadcast({
-      type: "system",
-      text: `${ws.nickname} left the chat`
-    });
+    broadcast({ type: "system", text: `${ws.nickname} left the chat` });
   });
 });
 
 // ---------- GLOBAL TIME LOGIC ----------
-// обновление времени для логики (день/ночь)
-setInterval(() => {
-  broadcast(getUtcTime());
-}, 60_000);
+setInterval(() => broadcast(getUtcTime()), 60_000);
+setInterval(() => broadcastServerTimeMessage(), 30_000);
 
-// сервер пишет в чат САМ (раз в 30 сек)
-setInterval(() => {
-  broadcastServerTimeMessage();
-}, 30_000);
-
-// ---------- START ----------
 server.listen(PORT, () => {
   console.log(`HTTP + WS server listening on port ${PORT}`);
 });
