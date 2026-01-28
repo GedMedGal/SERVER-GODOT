@@ -54,7 +54,7 @@ function broadcastServerTimeMessage() {
   const timeText = now.toLocaleTimeString("ru-RU", { timeZone: "UTC" });
   broadcast({
     type: "system",
-    text: `Время сервера (UTC): ${timeText}`
+    text: `UTC: ${timeText}`
   });
 }
 
