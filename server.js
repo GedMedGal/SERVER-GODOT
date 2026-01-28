@@ -4,7 +4,7 @@ const WebSocket = require("ws");
 const PORT = process.env.PORT || 10000;
 
 // ---------------- HTTP SERVER ----------------
-// Render требует HTTP-ответ
+// Render требует HTTP-ответ 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("OK");
