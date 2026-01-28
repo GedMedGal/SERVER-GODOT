@@ -1,5 +1,5 @@
 const WebSocket = require("ws");
-const http = require("http"); // для self-ping
+const http = require("http");
 
 const PORT = process.env.PORT || 10000;
 const wss = new WebSocket.Server({ port: PORT });
@@ -45,18 +45,35 @@ function broadcast(data) {
 // ---------- CONNECTION ----------
 wss.on("connection", ws => {
   ws.nickname = "Guest";
+  ws.lastActive = Date.now(); // Инициализация активности
 
-  // сразу отправляем время + сезон
+  // Отправляем текущее время при подключении
   ws.send(JSON.stringify(getUtcTime()));
 
   ws.on("message", raw => {
     let data;
-    try { data = JSON.parse(raw); }
-    catch { return; }
+    try { 
+      data = JSON.parse(raw); 
+    } catch { 
+      return; 
+    }
+
+    // КРИТИЧНО: обновляем активность ПЕРЕД обработкой
+    ws.lastActive = Date.now();
+
+    // === ОБРАБОТКА PING (ключевое исправление) ===
+    if (data.type === "ping") {
+      ws.send(JSON.stringify({ 
+        type: "pong", 
+        timestamp: Date.now(),
+        client_time: data.client_time || 0 
+      }));
+      return; // НЕ рассылаем другим!
+    }
 
     // JOIN
     if (data.type === "join") {
-      ws.nickname = String(data.name).substring(0, 16);
+      ws.nickname = String(data.name).substring(0, 16) || "Guest";
       broadcast({
         type: "system",
         text: `${ws.nickname} joined the chat`
@@ -66,18 +83,18 @@ wss.on("connection", ws => {
 
     // MESSAGE
     if (data.type === "message") {
-      if (!data.text || data.text.length > 200) return;
+      if (!data.text || typeof data.text !== "string" || data.text.trim() === "" || data.text.length > 200) return;
       broadcast({
         type: "message",
         name: ws.nickname,
-        text: data.text
+        text: data.text.trim()
       });
       return;
     }
 
-    // SYSTEM MESSAGE (новый блок)
+    // SYSTEM MESSAGE
     if (data.type === "system") {
-      if (!data.text || data.text.length > 200) return;
+      if (!data.text || typeof data.text !== "string" || data.text.length > 200) return;
       broadcast({
         type: "system",
         text: data.text
@@ -92,26 +109,35 @@ wss.on("connection", ws => {
       text: `${ws.nickname} left the chat`
     });
   });
+
+  ws.on("error", err => {
+    console.error(`WebSocket error (${ws.nickname}):`, err.message);
+  });
 });
 
-// раз в минуту обновляем время всем
+// Рассылка времени каждую минуту
 setInterval(() => {
   broadcast(getUtcTime());
 }, 60_000);
 
-// ---------- SELF-PING ----------
-// раз в 10 минут сервер сам себе делает запрос, чтобы не закрывался
+// === ЗАЩИТА ОТ НЕАКТИВНОСТИ (главное исправление) ===
+const INACTIVITY_TIMEOUT = 90_000; // 90 секунд
 setInterval(() => {
-  const options = {
-    host: "localhost",
-    port: PORT,
-    path: "/"
-  };
+  const now = Date.now();
+  wss.clients.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN && now - ws.lastActive > INACTIVITY_TIMEOUT) {
+      console.log(`[KICK] ${ws.nickname} inactive for ${(now - ws.lastActive)/1000}s`);
+      ws.close(1000, "Inactive"); // 1000 = нормальное закрытие
+    }
+  });
+}, 30_000); // Проверка каждые 30 сек
 
-  http.get(options, res => {
-    console.log(`Self-ping status: ${res.statusCode}`);
+// Self-ping для предотвращения сна сервера на Render
+setInterval(() => {
+  http.get({ host: "localhost", port: PORT, path: "/" }, res => {
+    console.log(`[SERVER] Self-ping OK (${res.statusCode})`);
     res.resume();
   }).on("error", err => {
-    console.log("Self-ping failed:", err.message);
+    console.log("[SERVER] Self-ping failed:", err.message);
   });
-}, 600_000); // 600_000 мс = 10 минут
+}, 600_000); // Каждые 10 минут
