@@ -64,8 +64,6 @@ function broadcastServerTimeMessage() {
 // ---------- CONNECTION ----------
 wss.on("connection", ws => {
   ws.nickname = "Guest";
-  ws.lastPing = 0;
-
   console.log("Client connected");
 
   // отправляем время один раз при входе
@@ -73,11 +71,7 @@ wss.on("connection", ws => {
 
   ws.on("message", raw => {
     let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      return;
-    }
+    try { data = JSON.parse(raw); } catch { return; }
 
     // JOIN
     if (data.type === "join") {
@@ -127,7 +121,6 @@ wss.on("connection", ws => {
 });
 
 // ---------- GLOBAL TIME LOGIC ----------
-
 // обновление времени для логики (день/ночь)
 setInterval(() => {
   broadcast(getUtcTime());
