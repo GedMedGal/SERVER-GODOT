@@ -2,19 +2,31 @@ const WebSocket = require("ws");
 const http = require("http");
 
 const PORT = process.env.PORT || 10000;
-const wss = new WebSocket.Server({ port: PORT });
 
-console.log("Chat + Time server running on port", PORT);
+/* ================= HTTP (чтобы Render не спал) ================= */
 
-// ---------- SEASON ----------
+const server = http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("OK");
+});
+
+/* ================= WebSocket ================= */
+
+const wss = new WebSocket.Server({ server });
+
+server.listen(PORT, () => {
+  console.log("Chat + Time server running on port", PORT);
+});
+
+/* ================= TIME / SEASON ================= */
+
 function getSeasonUTC(month) {
   if (month === 12 || month <= 2) return 0; // WINTER
-  if (month >= 3 && month <= 5) return 1;  // SPRING
-  if (month >= 6 && month <= 8) return 2;  // SUMMER
-  return 3;                               // FALL
+  if (month <= 5) return 1; // SPRING
+  if (month <= 8) return 2; // SUMMER
+  return 3; // FALL
 }
 
-// ---------- UTC TIME ----------
 function getUtcTime() {
   const now = new Date();
   const month = now.getUTCMonth() + 1;
@@ -32,48 +44,53 @@ function getUtcTime() {
   };
 }
 
-// ---------- BROADCAST ----------
+/* ================= BROADCAST ================= */
+
 function broadcast(data) {
   const msg = JSON.stringify(data);
-  wss.clients.forEach(c => {
-    if (c.readyState === WebSocket.OPEN) {
-      c.send(msg);
+  wss.clients.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(msg, err => {
+        if (err) console.error("Send error:", err.message);
+      });
     }
   });
 }
 
-// ---------- CONNECTION ----------
+/* ================= CONNECTION ================= */
+
+const INACTIVITY_TIMEOUT = 120_000; // 2 минуты
+
 wss.on("connection", ws => {
   ws.nickname = "Guest";
-  ws.lastActive = Date.now(); // Инициализация активности
+  ws.lastActive = Date.now();
 
-  // Отправляем текущее время при подключении
+  // сразу время
   ws.send(JSON.stringify(getUtcTime()));
 
   ws.on("message", raw => {
     let data;
-    try { 
-      data = JSON.parse(raw); 
-    } catch { 
-      return; 
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return;
     }
 
-    // КРИТИЧНО: обновляем активность ПЕРЕД обработкой
+    // ЛЮБОЕ валидное сообщение = активность
     ws.lastActive = Date.now();
 
-    // === ОБРАБОТКА PING (ключевое исправление) ===
+    /* ---------- PING ---------- */
     if (data.type === "ping") {
-      ws.send(JSON.stringify({ 
-        type: "pong", 
-        timestamp: Date.now(),
-        client_time: data.client_time || 0 
+      ws.send(JSON.stringify({
+        type: "pong",
+        server_time: Date.now()
       }));
-      return; // НЕ рассылаем другим!
+      return;
     }
 
-    // JOIN
+    /* ---------- JOIN ---------- */
     if (data.type === "join") {
-      ws.nickname = String(data.name).substring(0, 16) || "Guest";
+      ws.nickname = String(data.name || "Guest").slice(0, 16);
       broadcast({
         type: "system",
         text: `${ws.nickname} joined the chat`
@@ -81,9 +98,14 @@ wss.on("connection", ws => {
       return;
     }
 
-    // MESSAGE
+    /* ---------- CHAT ---------- */
     if (data.type === "message") {
-      if (!data.text || typeof data.text !== "string" || data.text.trim() === "" || data.text.length > 200) return;
+      if (
+        typeof data.text !== "string" ||
+        data.text.trim() === "" ||
+        data.text.length > 200
+      ) return;
+
       broadcast({
         type: "message",
         name: ws.nickname,
@@ -92,14 +114,13 @@ wss.on("connection", ws => {
       return;
     }
 
-    // SYSTEM MESSAGE
+    /* ---------- SYSTEM ---------- */
     if (data.type === "system") {
-      if (!data.text || typeof data.text !== "string" || data.text.length > 200) return;
+      if (typeof data.text !== "string") return;
       broadcast({
         type: "system",
-        text: data.text
+        text: data.text.slice(0, 200)
       });
-      return;
     }
   });
 
@@ -111,33 +132,51 @@ wss.on("connection", ws => {
   });
 
   ws.on("error", err => {
-    console.error(`WebSocket error (${ws.nickname}):`, err.message);
+    console.error("WS error:", err.message);
   });
 });
 
-// Рассылка времени каждую минуту
+/* ================= TIME BROADCAST ================= */
+
 setInterval(() => {
   broadcast(getUtcTime());
 }, 60_000);
 
-// === ЗАЩИТА ОТ НЕАКТИВНОСТИ (главное исправление) ===
-const INACTIVITY_TIMEOUT = 90_000; // 90 секунд
+/* ================= INACTIVITY KICK ================= */
+
 setInterval(() => {
   const now = Date.now();
   wss.clients.forEach(ws => {
-    if (ws.readyState === WebSocket.OPEN && now - ws.lastActive > INACTIVITY_TIMEOUT) {
-      console.log(`[KICK] ${ws.nickname} inactive for ${(now - ws.lastActive)/1000}s`);
-      ws.close(1000, "Inactive"); // 1000 = нормальное закрытие
+    if (
+      ws.readyState === WebSocket.OPEN &&
+      now - ws.lastActive > INACTIVITY_TIMEOUT
+    ) {
+      console.log(`[KICK] ${ws.nickname} inactive`);
+      ws.close(1000, "Inactive");
     }
   });
-}, 30_000); // Проверка каждые 30 сек
+}, 30_000);
 
-// Self-ping для предотвращения сна сервера на Render
+/* ================= SERVER HEARTBEAT (Render logs) ================= */
+
+function formatUptime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}m ${s}s`;
+}
+
 setInterval(() => {
-  http.get({ host: "localhost", port: PORT, path: "/" }, res => {
-    console.log(`[SERVER] Self-ping OK (${res.statusCode})`);
-    res.resume();
-  }).on("error", err => {
-    console.log("[SERVER] Self-ping failed:", err.message);
+  const now = new Date();
+
+  let open = 0;
+  wss.clients.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN) open++;
   });
-}, 600_000); // Каждые 10 минут
+
+  console.log(
+    `[HEARTBEAT] ${now.toISOString().replace("T", " ").slice(0, 19)} UTC | ` +
+    `clients: ${wss.clients.size} | ` +
+    `open: ${open} | ` +
+    `uptime: ${formatUptime(process.uptime())}`
+  );
+}, 60_000);
