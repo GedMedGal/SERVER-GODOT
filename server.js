@@ -3,7 +3,7 @@ const http = require("http");
 
 const PORT = process.env.PORT || 10000;
 
-/* ================= HTTP (чтобы Render не спал) ================= */
+/* ================= HTTP (Render keep-alive) ================= */
 const server = http.createServer((req, res) => {
   res.writeHead(200);
   res.end("OK");
@@ -53,16 +53,17 @@ function broadcast(data) {
 }
 
 /* ================= CONFIG ================= */
-const INACTIVITY_TIMEOUT = 180_000; // 3 минуты, безопасно для мобильного AFK
-const HEARTBEAT_INTERVAL = 60_000; // heartbeat каждые 60 сек
-const KICK_CHECK_INTERVAL = 30_000; // проверка AFK каждые 30 сек
+const INACTIVITY_TIMEOUT = 180_000;   // 3 минуты
+const HEARTBEAT_INTERVAL = 60_000;    // лог сервера
+const KICK_CHECK_INTERVAL = 30_000;   // AFK чек
+const SELF_PING_INTERVAL = 5 * 60_000;
 
 /* ================= CONNECTION ================= */
 wss.on("connection", ws => {
   ws.nickname = "Guest";
   ws.lastActive = Date.now();
 
-  // сразу время клиенту
+  // сразу отправляем время
   ws.send(JSON.stringify(getUtcTime()));
 
   ws.on("message", raw => {
@@ -73,17 +74,17 @@ wss.on("connection", ws => {
       return;
     }
 
-    // любое валидное сообщение = активность
-    ws.lastActive = Date.now();
-
-    /* ---------- PING ---------- */
+    /* ---------- PING / PONG ---------- */
     if (data.type === "ping") {
       ws.send(JSON.stringify({
         type: "pong",
         server_time: Date.now()
       }));
-      return;
+      return; // ❗ ping НЕ считается активностью
     }
+
+    // всё остальное = активность
+    ws.lastActive = Date.now();
 
     /* ---------- JOIN ---------- */
     if (data.type === "join") {
@@ -138,12 +139,17 @@ setInterval(() => {
   broadcast(getUtcTime());
 }, 60_000);
 
-/* ================= INACTIVITY KICK ================= */
+/* ================= AFK KICK ================= */
 setInterval(() => {
   const now = Date.now();
   wss.clients.forEach(ws => {
-    if (ws.readyState === WebSocket.OPEN && now - ws.lastActive > INACTIVITY_TIMEOUT) {
-      console.log(`[KICK] ${ws.nickname} inactive for ${(now - ws.lastActive)/1000}s`);
+    if (
+      ws.readyState === WebSocket.OPEN &&
+      now - ws.lastActive > INACTIVITY_TIMEOUT
+    ) {
+      console.log(
+        `[KICK] ${ws.nickname} inactive for ${(now - ws.lastActive) / 1000}s`
+      );
       ws.close(1000, "Inactive");
     }
   });
@@ -157,21 +163,22 @@ function formatUptime(sec) {
 }
 
 setInterval(() => {
-  const now = new Date();
   let open = 0;
-  wss.clients.forEach(ws => { if (ws.readyState === WebSocket.OPEN) open++; });
+  wss.clients.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN) open++;
+  });
 
-  console.log(`[HEARTBEAT] ${now.toISOString().replace("T", " ").slice(0, 19)} UTC | ` +
+  const now = new Date();
+  console.log(
+    `[HEARTBEAT] ${now.toISOString().replace("T", " ").slice(0, 19)} UTC | ` +
     `clients: ${wss.clients.size} | open: ${open} | uptime: ${formatUptime(process.uptime())}`
   );
 }, HEARTBEAT_INTERVAL);
 
-/* ================= SELF-PING (чтобы Render не спал) ================= */
+/* ================= SELF-PING (Render) ================= */
 setInterval(() => {
-  http.get({ host: "localhost", port: PORT, path: "/" }, res => {
-    console.log(`[SELF-PING] OK ${res.statusCode}`);
-    res.resume(); // обязательно “прочитать” ответ, иначе запрос зависнет
-  }).on("error", err => {
-    console.log("[SELF-PING] ERROR:", err.message);
-  });
-}, 5 * 60_000); // каждые 5 минут
+  http.get(
+    { host: "localhost", port: PORT, path: "/" },
+    res => res.resume()
+  ).on("error", () => {});
+}, SELF_PING_INTERVAL);
