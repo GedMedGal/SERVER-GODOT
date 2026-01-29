@@ -1,173 +1,167 @@
-extends Node
-class_name ChatController
+const WebSocket = require("ws");
+const http = require("http");
 
-signal message_received(text: String)
+const PORT = process.env.PORT || 10000;
 
-# ================== CONFIG ==================
-const SERVER_URL := "wss://server-godot-5ghy.onrender.com"
-const PING_INTERVAL := 10.0
-const RECONNECT_COOLDOWN := 2.0
-const MAX_PENDING := 10
+/* ================= HTTP (чтобы Render не спал) ================= */
+const server = http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("OK");
+});
 
-# ================== STATE ==================
-var ws: WebSocketPeer
-var connected := false
-var reconnecting := false
-var last_reconnect_time := 0.0
+/* ================= WebSocket ================= */
+const wss = new WebSocket.Server({ server });
 
-var pending_messages: Array[String] = []
+server.listen(PORT, () => {
+  console.log("Chat + Time server running on port", PORT);
+});
 
-# ================== SERVER DATA ==================
-var server_hour: int = 0
-var server_season: int = 0
-var server_date := {}
+/* ================= TIME / SEASON ================= */
+function getSeasonUTC(month) {
+  if (month === 12 || month <= 2) return 0; // WINTER
+  if (month <= 5) return 1; // SPRING
+  if (month <= 8) return 2; // SUMMER
+  return 3; // FALL
+}
 
-static var nick: String
+function getUtcTime() {
+  const now = new Date();
+  const month = now.getUTCMonth() + 1;
+  return {
+    type: "time",
+    year: now.getUTCFullYear(),
+    month,
+    day: now.getUTCDate(),
+    hour: now.getUTCHours(),
+    minute: now.getUTCMinutes(),
+    second: now.getUTCSeconds(),
+    unix: Math.floor(now.getTime() / 1000),
+    season: getSeasonUTC(month)
+  };
+}
 
-# ================== LIFECYCLE ==================
-func _ready() -> void:
-	process_mode = Node.PROCESS_MODE_ALWAYS
-	randomize()
+/* ================= BROADCAST ================= */
+function broadcast(data) {
+  const msg = JSON.stringify(data);
+  wss.clients.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(msg, err => {
+        if (err) console.error("Send error:", err.message);
+      });
+    }
+  });
+}
 
-	nick = "Player" + str(randi() % 1000)
+/* ================= CONFIG ================= */
+const INACTIVITY_TIMEOUT = 180_000; // 3 минуты, безопасно для мобильного AFK
+const HEARTBEAT_INTERVAL = 60_000; // heartbeat каждые 60 сек
+const KICK_CHECK_INTERVAL = 30_000; // проверка AFK каждые 30 сек
 
-	_create_ping_timer()
-	_connect_new_socket()
+/* ================= CONNECTION ================= */
+wss.on("connection", ws => {
+  ws.nickname = "Guest";
+  ws.lastActive = Date.now();
 
-# ================== SOCKET ==================
-func _connect_new_socket():
-	ws = WebSocketPeer.new()
-	var err = ws.connect_to_url(SERVER_URL)
-	print("[WS] connect:", err)
+  // сразу время клиенту
+  ws.send(JSON.stringify(getUtcTime()));
 
-func _process(_delta):
-	ws.poll()
+  ws.on("message", raw => {
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return;
+    }
 
-	var state := ws.get_ready_state()
+    // любое валидное сообщение = активность
+    ws.lastActive = Date.now();
 
-	# ---- CLOSED ----
-	if state == WebSocketPeer.STATE_CLOSED:
-		if connected:
-			print("[WS] closed")
-		connected = false
-		reconnecting = false
-		return
+    /* ---------- PING ---------- */
+    if (data.type === "ping") {
+      ws.send(JSON.stringify({
+        type: "pong",
+        server_time: Date.now()
+      }));
+      return;
+    }
 
-	# ---- OPEN (first time OR after reconnect) ----
-	if state == WebSocketPeer.STATE_OPEN and not connected:
-		connected = true
-		reconnecting = false
-		print("[WS] connected")
+    /* ---------- JOIN ---------- */
+    if (data.type === "join") {
+      ws.nickname = String(data.name || "Guest").slice(0, 16);
+      broadcast({
+        type: "system",
+        text: `${ws.nickname} joined the chat`
+      });
+      return;
+    }
 
-		_join_chat()
-		_flush_pending()
+    /* ---------- CHAT ---------- */
+    if (data.type === "message") {
+      if (
+        typeof data.text !== "string" ||
+        data.text.trim() === "" ||
+        data.text.length > 200
+      ) return;
 
-	# ---- INCOMING ----
-	while ws.get_available_packet_count() > 0:
-		var pkt := ws.get_packet().get_string_from_utf8()
-		var data = JSON.parse_string(pkt)
-		if data:
-			_handle_message(data)
+      broadcast({
+        type: "message",
+        name: ws.nickname,
+        text: data.text.trim()
+      });
+      return;
+    }
 
-# ================== JOIN ==================
-func _join_chat():
-	ws.send_text(JSON.stringify({
-		"type": "join",
-		"name": nick
-	}))
+    /* ---------- SYSTEM ---------- */
+    if (data.type === "system") {
+      if (typeof data.text !== "string") return;
+      broadcast({
+        type: "system",
+        text: data.text.slice(0, 200)
+      });
+    }
+  });
 
-# ================== SEND ==================
-func send_message(text: String):
-	if text.strip_edges() == "":
-		return
+  ws.on("close", () => {
+    broadcast({
+      type: "system",
+      text: `${ws.nickname} left the chat`
+    });
+  });
 
-	if ws.get_ready_state() != WebSocketPeer.STATE_OPEN:
-		print("[WS] not open → queue & reconnect")
-		_queue_message(text)
-		_try_reconnect()
-		return
+  ws.on("error", err => {
+    console.error("WS error:", err.message);
+  });
+});
 
-	ws.send_text(JSON.stringify({
-		"type": "message",
-		"text": text
-	}))
+/* ================= TIME BROADCAST ================= */
+setInterval(() => {
+  broadcast(getUtcTime());
+}, 60_000);
 
-func send_system_message(text: String):
-	if ws.get_ready_state() == WebSocketPeer.STATE_OPEN:
-		ws.send_text(JSON.stringify({
-			"type": "system",
-			"text": text
-		}))
-	else:
-		message_received.emit("[SYSTEM] " + text)
+/* ================= INACTIVITY KICK ================= */
+setInterval(() => {
+  const now = Date.now();
+  wss.clients.forEach(ws => {
+    if (ws.readyState === WebSocket.OPEN && now - ws.lastActive > INACTIVITY_TIMEOUT) {
+      console.log(`[KICK] ${ws.nickname} inactive for ${(now - ws.lastActive)/1000}s`);
+      ws.close(1000, "Inactive");
+    }
+  });
+}, KICK_CHECK_INTERVAL);
 
-# ================== RECONNECT ==================
-func _try_reconnect():
-	var now := Time.get_ticks_msec() / 1000.0
+/* ================= SERVER HEARTBEAT ================= */
+function formatUptime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}m ${s}s`;
+}
 
-	if reconnecting:
-		return
-	if now - last_reconnect_time < RECONNECT_COOLDOWN:
-		return
+setInterval(() => {
+  const now = new Date();
+  let open = 0;
+  wss.clients.forEach(ws => { if (ws.readyState === WebSocket.OPEN) open++; });
 
-	last_reconnect_time = now
-	reconnecting = true
-
-	print("[WS] reconnecting...")
-	_connect_new_socket()
-
-# ================== QUEUE ==================
-func _queue_message(text: String):
-	pending_messages.append(text)
-	if pending_messages.size() > MAX_PENDING:
-		pending_messages.pop_front()
-
-func _flush_pending():
-	for msg in pending_messages:
-		ws.send_text(JSON.stringify({
-			"type": "message",
-			"text": msg
-		}))
-	pending_messages.clear()
-
-# ================== PING ==================
-func _create_ping_timer():
-	var t := Timer.new()
-	t.wait_time = PING_INTERVAL
-	t.autostart = true
-	t.one_shot = false
-	t.timeout.connect(_send_ping)
-	add_child(t)
-
-func _send_ping():
-	if ws.get_ready_state() == WebSocketPeer.STATE_OPEN:
-		ws.send_text(JSON.stringify({
-			"type": "ping",
-			"client_time": Time.get_unix_time_from_system()
-		}))
-
-# ================== HANDLE INCOMING ==================
-func _handle_message(data):
-	match data.type:
-		"message":
-			message_received.emit(data.name + ": " + data.text)
-
-		"system":
-			message_received.emit("[SYSTEM] " + data.text)
-
-		"time":
-			server_hour = int(data.hour)
-			server_season = int(data.season)
-			server_date = {
-				"year": int(data.year),
-				"month": int(data.month),
-				"day": int(data.day)
-			}
-
-			EventBus.time_updated.emit(server_hour)
-			EventBus.season_updated.emit(server_season)
-			EventBus.date_updated.emit(
-				server_date.year,
-				server_date.month,
-				server_date.day
-			)
+  console.log(`[HEARTBEAT] ${now.toISOString().replace("T", " ").slice(0, 19)} UTC | ` +
+    `clients: ${wss.clients.size} | open: ${open} | uptime: ${formatUptime(process.uptime())}`
+  );
+}, HEARTBEAT_INTERVAL);
