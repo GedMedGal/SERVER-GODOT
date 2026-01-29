@@ -165,3 +165,13 @@ setInterval(() => {
     `clients: ${wss.clients.size} | open: ${open} | uptime: ${formatUptime(process.uptime())}`
   );
 }, HEARTBEAT_INTERVAL);
+
+/* ================= SELF-PING (чтобы Render не спал) ================= */
+setInterval(() => {
+  http.get({ host: "localhost", port: PORT, path: "/" }, res => {
+    console.log(`[SELF-PING] OK ${res.statusCode}`);
+    res.resume(); // обязательно “прочитать” ответ, иначе запрос зависнет
+  }).on("error", err => {
+    console.log("[SELF-PING] ERROR:", err.message);
+  });
+}, 5 * 60_000); // каждые 5 минут
